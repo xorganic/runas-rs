@@ -1,7 +1,8 @@
 # runas-rs 🦀
 
 ![Rust](https://img.shields.io/badge/made%20with-Rust-red)
-![Platform](https://img.shields.io/badge/platform-windows-blueviolet)
+![crate](https://img.shields.io/crates/v/runas-rs.svg)
+![docs](https://docs.rs/runas-rs/badge.svg)
 ![Forks](https://img.shields.io/github/forks/joaoviictorti/runas-rs)
 ![Stars](https://img.shields.io/github/stars/joaoviictorti/runas-rs)
 ![License](https://img.shields.io/github/license/joaoviictorti/runas-rs)
