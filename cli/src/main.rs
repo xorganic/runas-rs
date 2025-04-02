@@ -47,6 +47,34 @@ struct Args {
     /// Use credentials for remote access only
     #[arg(long)]
     netonly: bool,
+    
+    /// Create the process with a new console window
+    #[arg(long = "new-console")]
+    new_console: bool,
+    
+    /// Create the process with a new process group
+    #[arg(long = "new-process-group")]
+    new_process_group: bool,
+    
+    /// Create the process with a new window
+    #[arg(long = "new-window")]
+    new_window: bool,
+    
+    /// Create the process with a suspended main thread
+    #[arg(long)]
+    suspended: bool,
+    
+    /// Create the process with a debug flag
+    #[arg(long = "debug-process")]
+    debug_process: bool,
+    
+    /// Create the process with a debug flag for child processes
+    #[arg(long = "debug-only-this-process")]
+    debug_only_this_process: bool,
+    
+    /// Create the process with a protected process flag
+    #[arg(long = "protected-process")]
+    protected_process: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -65,6 +93,29 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     if args.netonly {
         options = options | Options::NetOnly;
+    }
+    
+    // Process creation options
+    if args.new_console {
+        options = options | Options::NewConsole;
+    }
+    if args.new_process_group {
+        options = options | Options::NewProcessGroup;
+    }
+    if args.new_window {
+        options = options | Options::NewWindow;
+    }
+    if args.suspended {
+        options = options | Options::Suspended;
+    }
+    if args.debug_process {
+        options = options | Options::DebugProcess;
+    }
+    if args.debug_only_this_process {
+        options = options | Options::DebugOnlyThisProcess;
+    }
+    if args.protected_process {
+        options = options | Options::ProtectedProcess;
     }
 
     let mut runas = Runas::new(&args.username, &args.password, args.domain.as_deref())
