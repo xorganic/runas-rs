@@ -3,7 +3,7 @@ use core::{
     ptr,
     ffi::c_void,
     ops::BitOr,
-    mem::zeroed, 
+    mem::{zeroed, size_of}, 
     ptr::{null, null_mut},
 };
 
@@ -22,22 +22,329 @@ use windows_sys::{
     core::w, 
     Win32::Storage::FileSystem::{
         READ_CONTROL, WRITE_DAC
-    }
-};
-use windows_sys::Win32::{
-    Security::*,
-    Foundation::*,
-    System::{
-        Threading::*,
-        SystemServices::*,
-        StationsAndDesktops::*,
-        Environment::{
-            GetEnvironmentStringsW, 
-            DestroyEnvironmentBlock,
-            CreateEnvironmentBlock
-        }, 
+    },
+    Win32::System::Threading::{
+        OpenProcess, OpenThread, SuspendThread, ResumeThread, PROCESS_SUSPEND_RESUME, 
+        PROCESS_QUERY_INFORMATION, THREAD_SUSPEND_RESUME, OpenProcessToken,
+        ImpersonateLoggedOnUser, RevertToSelf, DuplicateTokenEx, LookupPrivilegeNameW,
+        AdjustTokenPrivileges, CreateEnvironmentBlock, DestroyEnvironmentBlock,
+        GetEnvironmentStringsW, GetUserObjectInformationW, GetSidSubAuthorityCount,
+        GetSidSubAuthority, GetTokenInformation, TokenIntegrityLevel,
+        security_mandatory_low_rid, security_mandatory_medium_rid,
+        security_mandatory_high_rid, security_mandatory_system_rid
+    },
+    Win32::Foundation::{CloseHandle, GetLastError, TRUE, FALSE},
+    Win32::Security::{
+        GetTokenInformation, SetTokenInformation, TokenUser, TokenGroups, TokenPrivileges,
+        TokenSource, TokenType, TokenImpersonationLevel, TOKEN_QUERY, TOKEN_QUERY_SOURCE,
+        TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_GROUPS, TOKEN_ADJUST_PRIVILEGES, TOKEN_SOURCE,
+        TOKEN_TYPE, TOKEN_IMPERSONATION_LEVEL, TOKEN_USER, TOKEN_GROUPS, TOKEN_PRIVILEGES,
+        TOKEN_SOURCE_LENGTH, TOKEN_SOURCE_LENGTH as TOKEN_SOURCE_LENGTH_CONST,
+    },
+    Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32, 
+        TH32CS_SNAPTHREAD, INVALID_HANDLE_VALUE
     },
 };
+
+/// Represents a security context for a process or thread
+#[derive(Debug, Clone)]
+pub struct SecurityContext {
+    /// The process or thread ID
+    pub id: u32,
+    /// The user SID associated with the context
+    pub user_sid: Vec<u8>,
+    /// The integrity level of the context
+    pub integrity_level: u32,
+    /// The privileges available in the context
+    pub privileges: Vec<u8>,
+    /// The groups associated with the context
+    pub groups: Vec<u8>,
+    /// The impersonation level of the context
+    pub impersonation_level: u32,
+    /// The source name of the token
+    pub source_name: String,
+    /// The source identifier of the token
+    pub source_identifier: windows_sys::Win32::Foundation::LUID,
+    /// The type of the token
+    pub token_type: u32,
+    /// The group SIDs associated with the context
+    pub group_sids: Vec<u8>,
+}
+
+impl SecurityContext {
+    /// Creates a new security context
+    pub fn new(id: u32) -> Self {
+        SecurityContext {
+            id,
+            user_sid: Vec::new(),
+            integrity_level: 0,
+            privileges: Vec::new(),
+            groups: Vec::new(),
+            impersonation_level: 0,
+            source_name: String::new(),
+            source_identifier: windows_sys::Win32::Foundation::LUID { LowPart: 0, HighPart: 0 },
+            token_type: 0,
+            group_sids: Vec::new(),
+        }
+    }
+
+    /// Gets the security context for a process
+    pub fn get_process_context(pid: u32) -> Result<Self> {
+        unsafe {
+            let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+            if process_handle == 0 {
+                bail!("Failed to open process");
+            }
+
+            let mut token_handle = 0;
+            if OpenProcessToken(process_handle, TOKEN_QUERY, &mut token_handle) == 0 {
+                CloseHandle(process_handle);
+                bail!("Failed to open process token");
+            }
+
+            let mut context = SecurityContext::new(pid);
+            
+            // Get user SID
+            let mut token_user: TOKEN_USER = zeroed();
+            let mut return_length = 0;
+            if GetTokenInformation(
+                token_handle,
+                TokenUser,
+                &mut token_user as *mut _ as *mut _,
+                size_of::<TOKEN_USER>() as u32,
+                &mut return_length,
+            ) == 0 {
+                CloseHandle(token_handle);
+                CloseHandle(process_handle);
+                bail!("Failed to get token user information");
+            }
+            
+            // Get integrity level
+            let mut integrity_level = 0;
+            let mut return_length = 0;
+            if GetTokenInformation(
+                token_handle,
+                TokenIntegrityLevel,
+                &mut integrity_level as *mut _ as *mut _,
+                size_of::<u32>() as u32,
+                &mut return_length,
+            ) == 0 {
+                CloseHandle(token_handle);
+                CloseHandle(process_handle);
+                bail!("Failed to get token integrity level");
+            }
+            context.integrity_level = integrity_level;
+
+            // Get privileges
+            let mut privileges: TOKEN_PRIVILEGES = zeroed();
+            let mut return_length = 0;
+            if GetTokenInformation(
+                token_handle,
+                TokenPrivileges,
+                &mut privileges as *mut _ as *mut _,
+                size_of::<TOKEN_PRIVILEGES>() as u32,
+                &mut return_length,
+            ) == 0 {
+                CloseHandle(token_handle);
+                CloseHandle(process_handle);
+                bail!("Failed to get token privileges");
+            }
+
+            // Get groups
+            let mut groups: TOKEN_GROUPS = zeroed();
+            let mut return_length = 0;
+            if GetTokenInformation(
+                token_handle,
+                TokenGroups,
+                &mut groups as *mut _ as *mut _,
+                size_of::<TOKEN_GROUPS>() as u32,
+                &mut return_length,
+            ) == 0 {
+                CloseHandle(token_handle);
+                CloseHandle(process_handle);
+                bail!("Failed to get token groups");
+            }
+
+            // Get impersonation level
+            let mut impersonation_level = 0;
+            let mut return_length = 0;
+            if GetTokenInformation(
+                token_handle,
+                TokenImpersonationLevel,
+                &mut impersonation_level as *mut _ as *mut _,
+                size_of::<u32>() as u32,
+                &mut return_length,
+            ) == 0 {
+                CloseHandle(token_handle);
+                CloseHandle(process_handle);
+                bail!("Failed to get token impersonation level");
+            }
+            context.impersonation_level = impersonation_level;
+
+            CloseHandle(token_handle);
+            CloseHandle(process_handle);
+
+            Ok(context)
+        }
+    }
+
+    /// Sets the security context for a process
+    pub fn set_process_context(&self, pid: u32) -> Result<()> {
+        unsafe {
+            let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SUSPEND_RESUME, FALSE, pid);
+            if process_handle == 0 {
+                bail!("Failed to open process");
+            }
+
+            let mut token_handle = 0;
+            if OpenProcessToken(process_handle, TOKEN_ADJUST_DEFAULT | TOKEN_QUERY, &mut token_handle) == 0 {
+                CloseHandle(process_handle);
+                bail!("Failed to open process token");
+            }
+
+            // Set integrity level
+            if SetTokenInformation(
+                token_handle,
+                TokenIntegrityLevel,
+                &self.integrity_level as *const _ as *const _,
+                size_of::<u32>() as u32,
+            ) == 0 {
+                CloseHandle(token_handle);
+                CloseHandle(process_handle);
+                bail!("Failed to set token integrity level");
+            }
+
+            CloseHandle(token_handle);
+            CloseHandle(process_handle);
+
+            Ok(())
+        }
+    }
+
+    /// Gets the integrity level of a process
+    pub fn get_integrity_level(pid: u32) -> Result<u32> {
+        let context = SecurityContext::get_process_context(pid)?;
+        Ok(context.integrity_level)
+    }
+
+    /// Sets the integrity level of a process
+    pub fn set_integrity_level(pid: u32, level: u32) -> Result<()> {
+        let mut context = SecurityContext::get_process_context(pid)?;
+        context.integrity_level = level;
+        context.set_process_context(pid)
+    }
+
+    /// Checks if a process has a specific privilege
+    pub fn has_privilege(pid: u32, privilege: &str) -> Result<bool> {
+        let context = SecurityContext::get_process_context(pid)?;
+        Ok(context.privileges.iter().any(|p| p == privilege))
+    }
+
+    /// Enables a privilege for a process
+    pub fn enable_privilege(pid: u32, privilege: &str) -> Result<()> {
+        unsafe {
+            let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+            if process_handle == 0 {
+                bail!("Failed to open process");
+            }
+
+            let mut token_handle = 0;
+            if OpenProcessToken(process_handle, TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token_handle) == 0 {
+                CloseHandle(process_handle);
+                bail!("Failed to open process token");
+            }
+
+            let privilege_name = std::ffi::CString::new(privilege).unwrap();
+            let mut privilege_value = 0;
+            if LookupPrivilegeValueW(
+                null(),
+                privilege_name.as_ptr() as *const i8,
+                &mut privilege_value,
+            ) == 0 {
+                CloseHandle(token_handle);
+                CloseHandle(process_handle);
+                bail!("Failed to lookup privilege value");
+            }
+
+            let mut new_privileges: TOKEN_PRIVILEGES = zeroed();
+            new_privileges.PrivilegeCount = 1;
+            new_privileges.Privileges[0].Luid.LowPart = privilege_value as u32;
+            new_privileges.Privileges[0].Luid.HighPart = 0;
+            new_privileges.Privileges[0].Attributes = 2; // SE_PRIVILEGE_ENABLED
+
+            if AdjustTokenPrivileges(
+                token_handle,
+                FALSE,
+                &mut new_privileges,
+                size_of::<TOKEN_PRIVILEGES>() as u32,
+                null_mut(),
+                null_mut(),
+            ) == 0 {
+                CloseHandle(token_handle);
+                CloseHandle(process_handle);
+                bail!("Failed to adjust token privileges");
+            }
+
+            CloseHandle(token_handle);
+            CloseHandle(process_handle);
+
+            Ok(())
+        }
+    }
+
+    /// Gets a predefined integrity level constant
+    pub fn get_integrity_level_constant(level: &str) -> u32 {
+        match level.to_lowercase().as_str() {
+            "low" => security_mandatory_low_rid,
+            "medium" => security_mandatory_medium_rid,
+            "high" => security_mandatory_high_rid,
+            "system" => security_mandatory_system_rid,
+            _ => security_mandatory_medium_rid,
+        }
+    }
+
+    /// Impersonates a user token
+    pub fn impersonate_token(&self, token_handle: isize) -> Result<()> {
+        unsafe {
+            if ImpersonateLoggedOnUser(token_handle) == 0 {
+                bail!("Failed to impersonate token");
+            }
+            Ok(())
+        }
+    }
+
+    /// Reverts impersonation
+    pub fn revert_impersonation() -> Result<()> {
+        unsafe {
+            if RevertToSelf() == 0 {
+                bail!("Failed to revert impersonation");
+            }
+            Ok(())
+        }
+    }
+
+    /// Duplicates a token with specified access rights and impersonation level
+    pub fn duplicate_token(
+        source_token: isize,
+        access_rights: u32,
+        impersonation_level: u32,
+    ) -> Result<isize> {
+        unsafe {
+            let mut new_token = 0;
+            if DuplicateTokenEx(
+                source_token,
+                access_rights,
+                null_mut(),
+                impersonation_level,
+                &mut new_token,
+            ) == 0 {
+                bail!("Failed to duplicate token");
+            }
+            Ok(new_token)
+        }
+    }
+}
 
 /// Represents bitwise options for running processes with specific settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +363,27 @@ impl Options {
 
     /// Option to specify that credentials should only be used for remote access (`/netonly`).
     pub const NetOnly: Options = Options(0b00001000);
+    
+    /// Option to create the process with a new console window.
+    pub const NewConsole: Options = Options(0b00010000);
+    
+    /// Option to create the process with a new process group.
+    pub const NewProcessGroup: Options = Options(0b00100000);
+    
+    /// Option to create the process with a new window.
+    pub const NewWindow: Options = Options(0b01000000);
+    
+    /// Option to create the process with a suspended main thread.
+    pub const Suspended: Options = Options(0b10000000);
+    
+    /// Option to create the process with a debug flag.
+    pub const DebugProcess: Options = Options(0b100000000);
+    
+    /// Option to create the process with a debug flag for child processes.
+    pub const DebugOnlyThisProcess: Options = Options(0b1000000000);
+    
+    /// Option to create the process with a protected process flag.
+    pub const ProtectedProcess: Options = Options(0b10000000000);
 
     /// Checks if the current [`Options`] instance contains the specified option.
     ///
@@ -226,6 +554,35 @@ impl<'a> Runas<'a> {
             self.env = unsafe { GetEnvironmentStringsW().cast() };
             self.creation_flags = CREATE_UNICODE_ENVIRONMENT;
         }
+        
+        // Process creation options
+        if flags.contains(Options::NewConsole) {
+            self.creation_flags |= CREATE_NEW_CONSOLE;
+        }
+        
+        if flags.contains(Options::NewProcessGroup) {
+            self.creation_flags |= CREATE_NEW_PROCESS_GROUP;
+        }
+        
+        if flags.contains(Options::NewWindow) {
+            self.creation_flags |= CREATE_NEW_WINDOW;
+        }
+        
+        if flags.contains(Options::Suspended) {
+            self.creation_flags |= CREATE_SUSPENDED;
+        }
+        
+        if flags.contains(Options::DebugProcess) {
+            self.creation_flags |= DEBUG_PROCESS;
+        }
+        
+        if flags.contains(Options::DebugOnlyThisProcess) {
+            self.creation_flags |= DEBUG_ONLY_THIS_PROCESS;
+        }
+        
+        if flags.contains(Options::ProtectedProcess) {
+            self.creation_flags |= CREATE_PROTECTED_PROCESS;
+        }
 
         Ok(self)
     }
@@ -269,6 +626,11 @@ impl<'a> Runas<'a> {
             let domain = self.domain.to_pwstr();
             let password = self.password.to_pwstr();
             let mut command = command.to_pwstr();
+
+            // Create an output handler with default options
+            let mut output_handler = OutputHandler::new(OutputOptions::default())
+                .with_command(command.to_string_lossy().to_string())
+                .with_start_time(std::time::SystemTime::now());
 
             match self.default_process()? {
                 CreateProcessFunction::CreateProcessAsUser => {
@@ -367,10 +729,29 @@ impl<'a> Runas<'a> {
                 }
             }
 
+            // Set the process handle and PID in the output handler
+            output_handler = output_handler
+                .with_process_handle(pi.hProcess)
+                .with_pid(pi.dwProcessId);
+
+            // Close the write handle
             CloseHandle(write);
 
-            // Read the output from the process and return it as a string
-            Ok(Pipe::read(read))
+            // Wait for the process to complete
+            output_handler.wait_for_completion()?;
+
+            // Capture the output
+            output_handler.capture_output(read)?;
+
+            // Close the read handle
+            CloseHandle(read);
+
+            // Close the process handle
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+
+            // Return the formatted output
+            Ok(output_handler.get_formatted_output())
         }
     }
 
@@ -498,6 +879,222 @@ impl<'a> Runas<'a> {
 
         Ok(String::from_utf16_lossy(&buffer))
     }
+
+    /// Suspends a process by its process ID
+    ///
+    /// # Parameters
+    ///
+    /// * `pid` - The process ID of the process to suspend
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the process was successfully suspended
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// runas.suspend_process(1234)?;
+    /// ```
+    pub fn suspend_process(&self, pid: u32) -> Result<()> {
+        unsafe {
+            // Open the process with the necessary access rights
+            let process_handle = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, pid);
+            if process_handle.is_null() {
+                bail!("OpenProcess Failed With Error: {}", GetLastError());
+            }
+
+            // Suspend the process
+            let result = SuspendThread(process_handle);
+            if result == -1 {
+                CloseHandle(process_handle);
+                bail!("SuspendThread Failed With Error: {}", GetLastError());
+            }
+
+            // Close the process handle
+            CloseHandle(process_handle);
+            Ok(())
+        }
+    }
+
+    /// Resumes a suspended process by its process ID
+    ///
+    /// # Parameters
+    ///
+    /// * `pid` - The process ID of the process to resume
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the process was successfully resumed
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// runas.resume_process(1234)?;
+    /// ```
+    pub fn resume_process(&self, pid: u32) -> Result<()> {
+        unsafe {
+            // Open the process with the necessary access rights
+            let process_handle = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, pid);
+            if process_handle.is_null() {
+                bail!("OpenProcess Failed With Error: {}", GetLastError());
+            }
+
+            // Resume the process
+            let result = ResumeThread(process_handle);
+            if result == -1 {
+                CloseHandle(process_handle);
+                bail!("ResumeThread Failed With Error: {}", GetLastError());
+            }
+
+            // Close the process handle
+            CloseHandle(process_handle);
+            Ok(())
+        }
+    }
+
+    /// Suspends all threads in a process by its process ID
+    ///
+    /// # Parameters
+    ///
+    /// * `pid` - The process ID of the process whose threads should be suspended
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If all threads were successfully suspended
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// runas.suspend_all_threads(1234)?;
+    /// ```
+    pub fn suspend_all_threads(&self, pid: u32) -> Result<()> {
+        unsafe {
+            // Open the process with the necessary access rights
+            let process_handle = OpenProcess(PROCESS_SUSPEND_RESUME | PROCESS_QUERY_INFORMATION, FALSE, pid);
+            if process_handle.is_null() {
+                bail!("OpenProcess Failed With Error: {}", GetLastError());
+            }
+
+            // Get a snapshot of all threads in the system
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                CloseHandle(process_handle);
+                bail!("CreateToolhelp32Snapshot Failed With Error: {}", GetLastError());
+            }
+
+            // Initialize the thread entry structure
+            let mut thread_entry = THREADENTRY32 {
+                dwSize: size_of::<THREADENTRY32>() as u32,
+                ..zeroed()
+            };
+
+            // Iterate through all threads
+            if Thread32First(snapshot, &mut thread_entry) == TRUE {
+                loop {
+                    // Check if the thread belongs to our target process
+                    if thread_entry.th32OwnerProcessID == pid {
+                        // Open the thread with the necessary access rights
+                        let thread_handle = OpenThread(THREAD_SUSPEND_RESUME, FALSE, thread_entry.th32ThreadID);
+                        if !thread_handle.is_null() {
+                            // Suspend the thread
+                            let result = SuspendThread(thread_handle);
+                            if result == -1 {
+                                CloseHandle(thread_handle);
+                                CloseHandle(process_handle);
+                                CloseHandle(snapshot);
+                                bail!("SuspendThread Failed With Error: {}", GetLastError());
+                            }
+                            CloseHandle(thread_handle);
+                        }
+                    }
+
+                    // Move to the next thread
+                    if Thread32Next(snapshot, &mut thread_entry) == FALSE {
+                        break;
+                    }
+                }
+            }
+
+            // Clean up
+            CloseHandle(snapshot);
+            CloseHandle(process_handle);
+            Ok(())
+        }
+    }
+
+    /// Resumes all threads in a process by its process ID
+    ///
+    /// # Parameters
+    ///
+    /// * `pid` - The process ID of the process whose threads should be resumed
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If all threads were successfully resumed
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// runas.resume_all_threads(1234)?;
+    /// ```
+    pub fn resume_all_threads(&self, pid: u32) -> Result<()> {
+        unsafe {
+            // Open the process with the necessary access rights
+            let process_handle = OpenProcess(PROCESS_SUSPEND_RESUME | PROCESS_QUERY_INFORMATION, FALSE, pid);
+            if process_handle.is_null() {
+                bail!("OpenProcess Failed With Error: {}", GetLastError());
+            }
+
+            // Get a snapshot of all threads in the system
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                CloseHandle(process_handle);
+                bail!("CreateToolhelp32Snapshot Failed With Error: {}", GetLastError());
+            }
+
+            // Initialize the thread entry structure
+            let mut thread_entry = THREADENTRY32 {
+                dwSize: size_of::<THREADENTRY32>() as u32,
+                ..zeroed()
+            };
+
+            // Iterate through all threads
+            if Thread32First(snapshot, &mut thread_entry) == TRUE {
+                loop {
+                    // Check if the thread belongs to our target process
+                    if thread_entry.th32OwnerProcessID == pid {
+                        // Open the thread with the necessary access rights
+                        let thread_handle = OpenThread(THREAD_SUSPEND_RESUME, FALSE, thread_entry.th32ThreadID);
+                        if !thread_handle.is_null() {
+                            // Resume the thread
+                            let result = ResumeThread(thread_handle);
+                            if result == -1 {
+                                CloseHandle(thread_handle);
+                                CloseHandle(process_handle);
+                                CloseHandle(snapshot);
+                                bail!("ResumeThread Failed With Error: {}", GetLastError());
+                            }
+                            CloseHandle(thread_handle);
+                        }
+                    }
+
+                    // Move to the next thread
+                    if Thread32Next(snapshot, &mut thread_entry) == FALSE {
+                        break;
+                    }
+                }
+            }
+
+            // Clean up
+            CloseHandle(snapshot);
+            CloseHandle(process_handle);
+            Ok(())
+        }
+    }
 }
 
 /// Implements the `Drop` trait to release env when `Runas` goes out of scope.
@@ -576,10 +1173,10 @@ impl Token {
             // Interpret the integrity level RID and print a human-readable labe
             let level = ptr::read(ptr) as i32;
             let label = match level {
-                SECURITY_MANDATORY_LOW_RID => "Low",
-                SECURITY_MANDATORY_MEDIUM_RID => "Medium",
-                SECURITY_MANDATORY_HIGH_RID => "High",
-                SECURITY_MANDATORY_SYSTEM_RID => "System",
+                security_mandatory_low_rid => "Low",
+                security_mandatory_medium_rid => "Medium",
+                security_mandatory_high_rid => "High",
+                security_mandatory_system_rid => "System",
                 _ => "Unknown",
             };
     
@@ -686,6 +1283,617 @@ impl Token {
         }
 
         Ok(true)
+    }
+
+    /// Impersonates a user by their SID
+    ///
+    /// # Parameters
+    ///
+    /// * `sid` - The security identifier (SID) of the user to impersonate
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If impersonation was successful
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let user_sid = get_user_sid("username", "domain")?;
+    /// Token::impersonate_by_sid(&user_sid)?;
+    /// ```
+    pub fn impersonate_by_sid(sid: &[u8]) -> Result<()> {
+        unsafe {
+            // Get the process token for the current process
+            let mut h_token = null_mut();
+            if OpenProcessToken(-1isize as HANDLE, TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_IMPERSONATE, &mut h_token) == FALSE {
+                bail!("OpenProcessToken Failed With Error: {}", GetLastError());
+            }
+
+            // Create an impersonation token
+            let mut h_impersonation_token = null_mut();
+            if DuplicateTokenEx(
+                h_token,
+                TOKEN_ALL_ACCESS,
+                null_mut(),
+                SecurityImpersonation,
+                TokenImpersonation,
+                &mut h_impersonation_token
+            ) == FALSE {
+                bail!("DuplicateTokenEx Failed With Error: {}", GetLastError());
+            }
+
+            // Set the token's user SID
+            let mut token_user = TOKEN_USER {
+                User: SID_AND_ATTRIBUTES {
+                    Sid: sid.as_ptr() as *mut _,
+                    Attributes: 0,
+                },
+            };
+
+            if SetTokenInformation(
+                h_impersonation_token,
+                TokenUser,
+                &mut token_user as *mut _ as *mut c_void,
+                size_of::<TOKEN_USER>() as u32,
+            ) == FALSE {
+                bail!("SetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Impersonate the token
+            if ImpersonateLoggedOnUser(h_impersonation_token) == FALSE {
+                bail!("ImpersonateLoggedOnUser Failed With Error: {}", GetLastError());
+            }
+
+            // Clean up
+            CloseHandle(h_impersonation_token);
+            CloseHandle(h_token);
+
+            Ok(())
+        }
+    }
+    
+    /// Reverts impersonation to the original token
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If reversion was successful
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// Token::revert_impersonation()?;
+    /// ```
+    pub fn revert_impersonation() -> Result<()> {
+        unsafe {
+            if RevertToSelf() == FALSE {
+                bail!("RevertToSelf Failed With Error: {}", GetLastError());
+            }
+            Ok(())
+        }
+    }
+    
+    /// Duplicates a token with specific access rights
+    ///
+    /// # Parameters
+    ///
+    /// * `access_rights` - The access rights to request for the duplicated token
+    /// * `impersonation_level` - The impersonation level for the duplicated token
+    /// * `token_type` - The type of token to create
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(HANDLE)` - The handle to the duplicated token
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let h_token = Token::duplicate_token(
+    ///     TOKEN_ALL_ACCESS,
+    ///     SecurityImpersonation,
+    ///     TokenPrimary
+    /// )?;
+    /// ```
+    pub fn duplicate_token(access_rights: u32, impersonation_level: u32, token_type: u32) -> Result<HANDLE> {
+        unsafe {
+            // Get the process token for the current process
+            let mut h_token = null_mut();
+            if OpenProcessToken(-1isize as HANDLE, TOKEN_DUPLICATE | TOKEN_QUERY, &mut h_token) == FALSE {
+                bail!("OpenProcessToken Failed With Error: {}", GetLastError());
+            }
+
+            // Duplicate the token with the specified parameters
+            let mut h_duplicated_token = null_mut();
+            if DuplicateTokenEx(
+                h_token,
+                access_rights,
+                null_mut(),
+                impersonation_level,
+                token_type,
+                &mut h_duplicated_token
+            ) == FALSE {
+                CloseHandle(h_token);
+                bail!("DuplicateTokenEx Failed With Error: {}", GetLastError());
+            }
+
+            // Clean up the original token
+            CloseHandle(h_token);
+
+            Ok(h_duplicated_token)
+        }
+    }
+    
+    /// Gets all privileges available in the current token
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Vec<String>)` - A vector of privilege names
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let privileges = Token::get_all_privileges()?;
+    /// for privilege in privileges {
+    ///     println!("Privilege: {}", privilege);
+    /// }
+    /// ```
+    pub fn get_all_privileges() -> Result<Vec<String>> {
+        unsafe {
+            // Get the process token for the current process
+            let mut h_token = null_mut();
+            if OpenProcessToken(-1isize as HANDLE, TOKEN_QUERY, &mut h_token) == FALSE {
+                bail!("OpenProcessToken Failed With Error: {}", GetLastError());
+            }
+
+            // Make the first call to GetTokenInformation to get the size required
+            let mut len = 0;
+            GetTokenInformation(h_token, TokenPrivileges, null_mut(), 0, &mut len);
+            if GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Allocate memory for the TOKEN_PRIVILEGES structure
+            let mut buffer = vec![0u8; len as usize];
+            if GetTokenInformation(h_token, TokenPrivileges, buffer.as_mut_ptr().cast(), len, &mut len) == FALSE {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation [2] Failed With Error: {}", GetLastError());
+            }
+
+            let header = &*(buffer.as_ptr() as *const TOKEN_PRIVILEGES);
+            let privs = &header.Privileges as *const LUID_AND_ATTRIBUTES;
+            
+            let mut privileges = Vec::new();
+            
+            for i in 0..header.PrivilegeCount {
+                let luid_attr = privs.add(i as usize);
+                let luid = (*luid_attr).Luid;
+                
+                let mut buffer = vec![0u16; 128];
+                let mut len = buffer.len() as u32;
+
+                // Lookup the string name of the privilege from its LUID
+                if LookupPrivilegeNameW(null(), &luid, buffer.as_mut_ptr(), &mut len) == FALSE {
+                    continue;
+                }
+
+                // Convert UTF-16 buffer into a Rust `String`
+                buffer.truncate(len as usize);
+                let privilege = String::from_utf16_lossy(&buffer);
+                
+                privileges.push(privilege);
+            }
+            
+            CloseHandle(h_token);
+            Ok(privileges)
+        }
+    }
+
+    /// Gets the security context of the current process
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SecurityContext)` - A struct containing the security context information
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let context = Token::get_security_context()?;
+    /// println!("User SID: {:?}", context.user_sid);
+    /// println!("Group SIDs: {:?}", context.group_sids);
+    /// println!("Privileges: {:?}", context.privileges);
+    /// ```
+    pub fn get_security_context() -> Result<SecurityContext> {
+        unsafe {
+            // Get the process token for the current process
+            let mut h_token = null_mut();
+            if OpenProcessToken(-1isize as HANDLE, TOKEN_QUERY | TOKEN_QUERY_SOURCE, &mut h_token) == FALSE {
+                bail!("OpenProcessToken Failed With Error: {}", GetLastError());
+            }
+
+            // Get the user SID
+            let mut user_sid = Vec::new();
+            let mut user_sid_size = 0;
+            GetTokenInformation(h_token, TokenUser, null_mut(), 0, &mut user_sid_size);
+            if GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            user_sid.resize(user_sid_size as usize, 0);
+            if GetTokenInformation(h_token, TokenUser, user_sid.as_mut_ptr().cast(), user_sid_size, &mut user_sid_size) == FALSE {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the group SIDs
+            let mut group_sids = Vec::new();
+            let mut group_sids_size = 0;
+            GetTokenInformation(h_token, TokenGroups, null_mut(), 0, &mut group_sids_size);
+            if GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            group_sids.resize(group_sids_size as usize, 0);
+            if GetTokenInformation(h_token, TokenGroups, group_sids.as_mut_ptr().cast(), group_sids_size, &mut group_sids_size) == FALSE {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the privileges
+            let mut privileges = Vec::new();
+            let mut privileges_size = 0;
+            GetTokenInformation(h_token, TokenPrivileges, null_mut(), 0, &mut privileges_size);
+            if GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            privileges.resize(privileges_size as usize, 0);
+            if GetTokenInformation(h_token, TokenPrivileges, privileges.as_mut_ptr().cast(), privileges_size, &mut privileges_size) == FALSE {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the token source
+            let mut token_source = TOKEN_SOURCE {
+                SourceName: [0; 8],
+                SourceIdentifier: zeroed(),
+            };
+            let mut token_source_size = size_of::<TOKEN_SOURCE>() as u32;
+            if GetTokenInformation(h_token, TokenSource, &mut token_source as *mut _ as *mut c_void, token_source_size, &mut token_source_size) == FALSE {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the token type
+            let mut token_type = 0;
+            let mut token_type_size = size_of::<u32>() as u32;
+            if GetTokenInformation(h_token, TokenType, &mut token_type as *mut _ as *mut c_void, token_type_size, &mut token_type_size) == FALSE {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the token impersonation level
+            let mut impersonation_level = 0;
+            let mut impersonation_level_size = size_of::<u32>() as u32;
+            if GetTokenInformation(h_token, TokenImpersonationLevel, &mut impersonation_level as *mut _ as *mut c_void, impersonation_level_size, &mut impersonation_level_size) == FALSE {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the integrity level
+            let mut integrity_level = 0;
+            let mut integrity_level_size = size_of::<u32>() as u32;
+            if GetTokenInformation(h_token, TokenIntegrityLevel, &mut integrity_level as *mut _ as *mut c_void, integrity_level_size, &mut integrity_level_size) == FALSE {
+                CloseHandle(h_token);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Clean up
+            CloseHandle(h_token);
+
+            // Convert the token source name to a string
+            let source_name = std::str::from_utf8(&token_source.SourceName)
+                .unwrap_or("Unknown")
+                .trim_matches('\0')
+                .to_string();
+
+            Ok(SecurityContext {
+                id: 0, // Current process ID
+                user_sid,
+                integrity_level,
+                privileges,
+                groups: Vec::new(), // This is a duplicate of group_sids
+                impersonation_level,
+                source_name,
+                source_identifier: token_source.SourceIdentifier,
+                token_type,
+                group_sids,
+            })
+        }
+    }
+
+    /// Sets the security context for the current process
+    ///
+    /// # Parameters
+    ///
+    /// * `context` - The security context to set
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the security context was successfully set
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let context = Token::get_security_context()?;
+    /// // Modify the context as needed
+    /// Token::set_security_context(&context)?;
+    /// ```
+    pub fn set_security_context(context: &SecurityContext) -> Result<()> {
+        unsafe {
+            // Get the process token for the current process
+            let mut h_token = null_mut();
+            if OpenProcessToken(-1isize as HANDLE, TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_GROUPS | TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut h_token) == FALSE {
+                bail!("OpenProcessToken Failed With Error: {}", GetLastError());
+            }
+
+            // Set the user SID
+            if !context.user_sid.is_empty() {
+                let user_sid_ptr = context.user_sid.as_ptr() as *const TOKEN_USER;
+                if SetTokenInformation(h_token, TokenUser, user_sid_ptr as *mut c_void, context.user_sid.len() as u32) == FALSE {
+                    CloseHandle(h_token);
+                    bail!("SetTokenInformation Failed With Error: {}", GetLastError());
+                }
+            }
+
+            // Set the group SIDs
+            if !context.group_sids.is_empty() {
+                let group_sids_ptr = context.group_sids.as_ptr() as *const TOKEN_GROUPS;
+                if SetTokenInformation(h_token, TokenGroups, group_sids_ptr as *mut c_void, context.group_sids.len() as u32) == FALSE {
+                    CloseHandle(h_token);
+                    bail!("SetTokenInformation Failed With Error: {}", GetLastError());
+                }
+            }
+
+            // Set the privileges
+            if !context.privileges.is_empty() {
+                let privileges_ptr = context.privileges.as_ptr() as *const TOKEN_PRIVILEGES;
+                if SetTokenInformation(h_token, TokenPrivileges, privileges_ptr as *mut c_void, context.privileges.len() as u32) == FALSE {
+                    CloseHandle(h_token);
+                    bail!("SetTokenInformation Failed With Error: {}", GetLastError());
+                }
+            }
+
+            // Clean up
+            CloseHandle(h_token);
+            Ok(())
+        }
+    }
+
+    /// Gets the security context of a process by its process ID
+    ///
+    /// # Parameters
+    ///
+    /// * `pid` - The process ID of the process
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(SecurityContext)` - A struct containing the security context information
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let context = Token::get_process_security_context(1234)?;
+    /// println!("User SID: {:?}", context.user_sid);
+    /// ```
+    pub fn get_process_security_context(pid: u32) -> Result<SecurityContext> {
+        unsafe {
+            // Open the process with the necessary access rights
+            let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+            if process_handle.is_null() {
+                bail!("OpenProcess Failed With Error: {}", GetLastError());
+            }
+
+            // Get the process token
+            let mut h_token = null_mut();
+            if OpenProcessToken(process_handle, TOKEN_QUERY | TOKEN_QUERY_SOURCE, &mut h_token) == FALSE {
+                CloseHandle(process_handle);
+                bail!("OpenProcessToken Failed With Error: {}", GetLastError());
+            }
+
+            // Get the user SID
+            let mut user_sid = Vec::new();
+            let mut user_sid_size = 0;
+            GetTokenInformation(h_token, TokenUser, null_mut(), 0, &mut user_sid_size);
+            if GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                CloseHandle(h_token);
+                CloseHandle(process_handle);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            user_sid.resize(user_sid_size as usize, 0);
+            if GetTokenInformation(h_token, TokenUser, user_sid.as_mut_ptr().cast(), user_sid_size, &mut user_sid_size) == FALSE {
+                CloseHandle(h_token);
+                CloseHandle(process_handle);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the group SIDs
+            let mut group_sids = Vec::new();
+            let mut group_sids_size = 0;
+            GetTokenInformation(h_token, TokenGroups, null_mut(), 0, &mut group_sids_size);
+            if GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                CloseHandle(h_token);
+                CloseHandle(process_handle);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            group_sids.resize(group_sids_size as usize, 0);
+            if GetTokenInformation(h_token, TokenGroups, group_sids.as_mut_ptr().cast(), group_sids_size, &mut group_sids_size) == FALSE {
+                CloseHandle(h_token);
+                CloseHandle(process_handle);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the privileges
+            let mut privileges = Vec::new();
+            let mut privileges_size = 0;
+            GetTokenInformation(h_token, TokenPrivileges, null_mut(), 0, &mut privileges_size);
+            if GetLastError() != ERROR_INSUFFICIENT_BUFFER {
+                CloseHandle(h_token);
+                CloseHandle(process_handle);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            privileges.resize(privileges_size as usize, 0);
+            if GetTokenInformation(h_token, TokenPrivileges, privileges.as_mut_ptr().cast(), privileges_size, &mut privileges_size) == FALSE {
+                CloseHandle(h_token);
+                CloseHandle(process_handle);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the token source
+            let mut token_source = TOKEN_SOURCE {
+                SourceName: [0; 8],
+                SourceIdentifier: zeroed(),
+            };
+            let mut token_source_size = size_of::<TOKEN_SOURCE>() as u32;
+            if GetTokenInformation(h_token, TokenSource, &mut token_source as *mut _ as *mut c_void, token_source_size, &mut token_source_size) == FALSE {
+                CloseHandle(h_token);
+                CloseHandle(process_handle);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the token type
+            let mut token_type = 0;
+            let mut token_type_size = size_of::<u32>() as u32;
+            if GetTokenInformation(h_token, TokenType, &mut token_type as *mut _ as *mut c_void, token_type_size, &mut token_type_size) == FALSE {
+                CloseHandle(h_token);
+                CloseHandle(process_handle);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the token impersonation level
+            let mut impersonation_level = 0;
+            let mut impersonation_level_size = size_of::<u32>() as u32;
+            if GetTokenInformation(h_token, TokenImpersonationLevel, &mut impersonation_level as *mut _ as *mut c_void, impersonation_level_size, &mut impersonation_level_size) == FALSE {
+                CloseHandle(h_token);
+                CloseHandle(process_handle);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Get the integrity level
+            let mut integrity_level = 0;
+            let mut integrity_level_size = size_of::<u32>() as u32;
+            if GetTokenInformation(h_token, TokenIntegrityLevel, &mut integrity_level as *mut _ as *mut c_void, integrity_level_size, &mut integrity_level_size) == FALSE {
+                CloseHandle(h_token);
+                CloseHandle(process_handle);
+                bail!("GetTokenInformation Failed With Error: {}", GetLastError());
+            }
+
+            // Clean up
+            CloseHandle(h_token);
+            CloseHandle(process_handle);
+
+            // Convert the token source name to a string
+            let source_name = std::str::from_utf8(&token_source.SourceName)
+                .unwrap_or("Unknown")
+                .trim_matches('\0')
+                .to_string();
+
+            Ok(SecurityContext {
+                id: pid,
+                user_sid,
+                integrity_level,
+                privileges,
+                groups: Vec::new(), // This is a duplicate of group_sids
+                impersonation_level,
+                source_name,
+                source_identifier: token_source.SourceIdentifier,
+                token_type,
+                group_sids,
+            })
+        }
+    }
+
+    /// Sets the security context for a process by its process ID
+    ///
+    /// # Parameters
+    ///
+    /// * `pid` - The process ID of the process
+    /// * `context` - The security context to set
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - If the security context was successfully set
+    /// * `Err(anyhow::Error)` - If any Windows API call fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let context = Token::get_process_security_context(1234)?;
+    /// // Modify the context as needed
+    /// Token::set_process_security_context(1234, &context)?;
+    /// ```
+    pub fn set_process_security_context(pid: u32, context: &SecurityContext) -> Result<()> {
+        unsafe {
+            // Open the process with the necessary access rights
+            let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+            if process_handle.is_null() {
+                bail!("OpenProcess Failed With Error: {}", GetLastError());
+            }
+
+            // Get the process token
+            let mut h_token = null_mut();
+            if OpenProcessToken(process_handle, TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_GROUPS | TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut h_token) == FALSE {
+                CloseHandle(process_handle);
+                bail!("OpenProcessToken Failed With Error: {}", GetLastError());
+            }
+
+            // Set the user SID
+            if !context.user_sid.is_empty() {
+                let user_sid_ptr = context.user_sid.as_ptr() as *const TOKEN_USER;
+                if SetTokenInformation(h_token, TokenUser, user_sid_ptr as *mut c_void, context.user_sid.len() as u32) == FALSE {
+                    CloseHandle(h_token);
+                    CloseHandle(process_handle);
+                    bail!("SetTokenInformation Failed With Error: {}", GetLastError());
+                }
+            }
+
+            // Set the group SIDs
+            if !context.group_sids.is_empty() {
+                let group_sids_ptr = context.group_sids.as_ptr() as *const TOKEN_GROUPS;
+                if SetTokenInformation(h_token, TokenGroups, group_sids_ptr as *mut c_void, context.group_sids.len() as u32) == FALSE {
+                    CloseHandle(h_token);
+                    CloseHandle(process_handle);
+                    bail!("SetTokenInformation Failed With Error: {}", GetLastError());
+                }
+            }
+
+            // Set the privileges
+            if !context.privileges.is_empty() {
+                let privileges_ptr = context.privileges.as_ptr() as *const TOKEN_PRIVILEGES;
+                if SetTokenInformation(h_token, TokenPrivileges, privileges_ptr as *mut c_void, context.privileges.len() as u32) == FALSE {
+                    CloseHandle(h_token);
+                    CloseHandle(process_handle);
+                    bail!("SetTokenInformation Failed With Error: {}", GetLastError());
+                }
+            }
+
+            // Clean up
+            CloseHandle(h_token);
+            CloseHandle(process_handle);
+            Ok(())
+        }
     }
 }
 
