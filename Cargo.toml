@@ -30,7 +30,13 @@ features = [
     "Win32_System_Threading", 
     "Win32_System_WindowsProgramming", 
     "Win32_UI_WindowsAndMessaging",
-    "Win32_System_SystemServices"
+    "Win32_System_SystemServices",
+    "Win32_Security_Authorization",
+    "Win32_Security_Authorization_UI",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
+    "Win32_Foundation"
 ]
 
 [package.metadata.docs.rs]
