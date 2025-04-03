@@ -8,6 +8,7 @@
 ![License](https://img.shields.io/github/license/joaoviictorti/runas-rs)
 
 An offensive version of `runas` in Rust with extra features for security testing and red teaming operations.
+As a security researcher, I've found this tool incredibly valuable for a fork. This is a fork of the original repository that continues to build upon the solid foundation laid by Victor. His expertise in Windows internals and offensive security tooling in Rust is impressive lmao..
 
 ## Table of Contents
 
@@ -251,7 +252,7 @@ When using this library:
 ## References
 
 Special thanks to:
-- [@joaoviictorti](https://github.com/joaoviictorti) for creating this outstanding project. As a security enthusiast, I've found this tool incredibly valuable for my work and learning journey. This is a fork of the original repository that continues to build upon the solid foundation laid by Victor. His expertise in Windows internals and offensive security tooling in Rust is truly impressive.
+- [@joaoviictorti](https://github.com/joaoviictorti) for creating this outstanding project. 
 - [Pavel - CreateProcessAsUser vs. CreateProcessWithTokenW](https://www.youtube.com/watch?v=y42BsQJhd5w&t=816s)
 - [Pavel - Window Stations and Desktops](https://scorpiosoftware.net/2023/06/20/window-stations-and-desktops/)
 - [RunasCs](https://github.com/antonioCoco/RunasCs)
