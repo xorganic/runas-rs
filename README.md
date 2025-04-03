@@ -238,16 +238,6 @@ CLI Options:
 - `--debug-only-this-process` - Debug child processes
 - `--protected-process` - Protected process flag
 
-## Security Considerations
-
-When using this library:
-
-1. **Permissions**: Ensure appropriate permissions for operations
-2. **Resource Management**: Properly manage handles and memory
-3. **Error Handling**: Implement comprehensive error handling
-4. **Cleanup**: Ensure proper resource cleanup
-5. **Anti-Detection**: Be aware of detection mechanisms
-6. **Legal Compliance**: Use only for authorized testing
 
 ## References
 
