@@ -123,7 +123,7 @@ Usage: runas.exe [OPTIONS] -u <USERNAME> -p <PASSWORD> --command <COMMAND> <--pr
 
 Options:
   -u <USERNAME>            Username to run the command
-  -p <PASSWORD>            Password for the user
+  -p <PASSWORD>            Password for the use
   -d, --domain <DOMAIN>    Domain of the user (optional)
   -c, --command <COMMAND>  Command to execute as the specified user
   -e                       Use the environment of the current user
@@ -137,10 +137,11 @@ Options:
 ## References
 
 I want to express my gratitude to these projects that inspired me to create `runas-rs` and contribute with some features:
-
+* [joaoviictorti](https://github.com/joaoviictorti)
 * [Pavel - CreateProcessAsUser vs. CreateProcessWithTokenW](https://www.youtube.com/watch?v=y42BsQJhd5w&t=816s)
 * [Pavel - Window Stations and Desktops](https://scorpiosoftware.net/2023/06/20/window-stations-and-desktops/)
 * [RunasCs](https://github.com/antonioCoco/RunasCs)
+
 
 ## License
 
