@@ -7,8 +7,9 @@
 ![Stars](https://img.shields.io/github/stars/joaoviictorti/runas-rs)
 ![License](https://img.shields.io/github/license/joaoviictorti/runas-rs)
 
-An offensive version of `runas` in Rust with extra features for security testing and red teaming operations.
-As a security researcher, I've found this tool incredibly valuable for a fork. This is a fork of the original repository that continues to build upon the solid foundation laid by Victor. His expertise in Windows internals and offensive security tooling in Rust is impressive lmao..
+An offensive version of `runas` in Rust with extra features. 
+As a security researcher, I've found this tool incredibly valuable.
+This is a fork of the original repository that continues to build upon the solid foundation laid by Victor.
 
 ## Table of Contents
 
